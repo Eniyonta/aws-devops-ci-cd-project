@@ -170,13 +170,13 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Download ECS task definition
-        run: |
+  run: |
     aws ecs describe-task-definition \
       --task-definition flask-cicd-app-task \
       --query taskDefinition \
       > task-definition.json
 
-    jq 'del(
+    cat task-definition.json | jq 'del(
       .taskDefinitionArn,
       .revision,
       .status,
@@ -185,11 +185,14 @@ jobs:
       .registeredAt,
       .registeredBy,
       .enableFaultInjection
-    )' task-definition.json > cleaned-task-definition.json
+    )' > cleaned-task-definition.json
 
     mv cleaned-task-definition.json task-definition.json
 
-      - name: Update ECS task definition
+    echo "✅ Cleaned task definition:"
+    cat task-definition.json
+
+     - name: Update ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
