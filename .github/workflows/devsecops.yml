@@ -1,0 +1,188 @@
+name: DevSecOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: my-flask-app
+
+jobs:
+
+  # ─────────────────────────────────────────
+  # JOB 1: Dependency Scanning with Snyk
+  # ─────────────────────────────────────────
+  snyk-scan:
+    name: 🔍 Snyk Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt
+
+      - name: Run Snyk scan
+        uses: snyk/actions/python@master
+        continue-on-error: false
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --file=app/requirements.txt
+
+      - name: Upload Snyk results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-results
+          path: snyk-results.json
+
+  # ─────────────────────────────────────────
+  # JOB 2: Code Quality with SonarCloud
+  # ─────────────────────────────────────────
+  sonarcloud-scan:
+    name: 📊 SonarCloud Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ─────────────────────────────────────────
+  # JOB 3: Terraform Scan with Checkov
+  # ─────────────────────────────────────────
+  checkov-scan:
+    name: 🏗️ Checkov Terraform Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform-devsecops
+          framework: terraform
+          soft_fail: false
+          output_format: cli
+          download_external_modules: true
+
+  # ─────────────────────────────────────────
+  # JOB 4: Build Docker Image
+  # ─────────────────────────────────────────
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [snyk-scan, sonarcloud-scan, checkov-scan]
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ─────────────────────────────────────
+      # Trivy Docker Image Scan
+      # ─────────────────────────────────────
+      - name: 🛡️ Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Push image to ECR
+        if: success()
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "✅ Image pushed successfully"
+
+  # ─────────────────────────────────────────
+  # JOB 5: Deploy (only if ALL scans pass)
+  # ─────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && success()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition flask-cicd-app-task \
+            --query taskDefinition \
+            > task-definition.json
+
+      - name: Update ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: flask-app
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: flask-cicd-app-service
+          cluster: flask-cicd-app-cluster
+          wait-for-service-stability: true
+
+      - name: Deployment success
+        run: echo "✅ Deployment successful - all security scans passed!"
