@@ -171,10 +171,23 @@ jobs:
 
       - name: Download ECS task definition
         run: |
-          aws ecs describe-task-definition \
-            --task-definition flask-cicd-app-task \
-            --query taskDefinition \
-            > task-definition.json
+    aws ecs describe-task-definition \
+      --task-definition flask-cicd-app-task \
+      --query taskDefinition \
+      > task-definition.json
+
+    jq 'del(
+      .taskDefinitionArn,
+      .revision,
+      .status,
+      .requiresAttributes,
+      .compatibilities,
+      .registeredAt,
+      .registeredBy,
+      .enableFaultInjection
+    )' task-definition.json > cleaned-task-definition.json
+
+    mv cleaned-task-definition.json task-definition.json
 
       - name: Update ECS task definition
         id: task-def
