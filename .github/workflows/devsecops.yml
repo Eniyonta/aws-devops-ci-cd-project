@@ -12,9 +12,6 @@ env:
 
 jobs:
 
-  # ─────────────────────────────────────────
-  # JOB 1: Dependency Scanning with Snyk
-  # ─────────────────────────────────────────
   snyk-scan:
     name: 🔍 Snyk Dependency Scan
     runs-on: ubuntu-latest
@@ -28,8 +25,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: |
-          pip install -r app/requirements.txt
+        run: pip install -r app/requirements.txt
 
       - name: Run Snyk scan
         run: |
@@ -42,16 +38,6 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      - name: Upload Snyk results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: snyk-results
-          path: snyk-results.json
-
-  # ─────────────────────────────────────────
-  # JOB 2: Code Quality with SonarCloud
-  # ─────────────────────────────────────────
   sonarcloud-scan:
     name: 📊 SonarCloud Code Quality
     runs-on: ubuntu-latest
@@ -67,9 +53,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-  # ─────────────────────────────────────────
-  # JOB 3: Terraform Scan with Checkov
-  # ─────────────────────────────────────────
   checkov-scan:
     name: 🏗️ Checkov Terraform Scan
     runs-on: ubuntu-latest
@@ -91,15 +74,10 @@ jobs:
             CKV2_AWS_5,
             CKV_AWS_260
 
-  # ─────────────────────────────────────────
-  # JOB 4: Build Docker Image
-  # ─────────────────────────────────────────
   build:
     name: 🐳 Build Docker Image
     runs-on: ubuntu-latest
     needs: [snyk-scan, sonarcloud-scan, checkov-scan]
-    outputs:
-      image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -122,13 +100,9 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # ─────────────────────────────────────
-      # Trivy Docker Image Scan
-      # ─────────────────────────────────────
-      - name: 🛡️ Trivy image scan
+      - name: Trivy image scan
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
@@ -146,9 +120,6 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "✅ Image pushed successfully"
 
-  # ─────────────────────────────────────────
-  # JOB 5: Deploy (only if ALL scans pass)
-  # ─────────────────────────────────────────
   deploy:
     name: 🚀 Deploy to ECS
     runs-on: ubuntu-latest
@@ -170,29 +141,13 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Download ECS task definition
-  run: |
-    aws ecs describe-task-definition \
-      --task-definition flask-cicd-app-task \
-      --query taskDefinition \
-      > task-definition.json
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition flask-cicd-app-task \
+            --query taskDefinition \
+            > task-definition.json
 
-    cat task-definition.json | jq 'del(
-      .taskDefinitionArn,
-      .revision,
-      .status,
-      .requiresAttributes,
-      .compatibilities,
-      .registeredAt,
-      .registeredBy,
-      .enableFaultInjection
-    )' > cleaned-task-definition.json
-
-    mv cleaned-task-definition.json task-definition.json
-
-    echo "✅ Cleaned task definition:"
-    cat task-definition.json
-
-     - name: Update ECS task definition
+      - name: Update ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -209,4 +164,4 @@ jobs:
           wait-for-service-stability: true
 
       - name: Deployment success
-        run: echo "✅ Deployment successful - all security scans passed!"
+        run: echo "✅ All security scans passed — deployment successful!"
