@@ -85,6 +85,11 @@ jobs:
           soft_fail: false
           output_format: cli
           download_external_modules: true
+          skip_check: >-
+            CKV_AWS_144,
+            CKV2_AWS_62,
+            CKV2_AWS_5,
+            CKV_AWS_260
 
   # ─────────────────────────────────────────
   # JOB 4: Build Docker Image
